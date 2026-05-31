@@ -18,7 +18,7 @@ async function wait(fn: () => boolean, timeout = 2000) {
   }
 }
 
-function event(payload: Event, input: { directory: string; project?: string; workspace?: string }): GlobalEvent {
+function event(payload: GlobalEvent["payload"], input: { directory: string; project?: string; workspace?: string }): GlobalEvent {
   return {
     directory: input.directory,
     project: input.project,
@@ -27,7 +27,7 @@ function event(payload: Event, input: { directory: string; project?: string; wor
   }
 }
 
-function vcs(branch: string): Event {
+function vcs(branch: string): GlobalEvent["payload"] {
   return {
     id: `evt_vcs_${branch}`,
     type: "vcs.branch.updated",
@@ -37,7 +37,7 @@ function vcs(branch: string): Event {
   }
 }
 
-function update(version: string): Event {
+function update(version: string): GlobalEvent["payload"] {
   return {
     id: `evt_update_${version}`,
     type: "installation.update-available",

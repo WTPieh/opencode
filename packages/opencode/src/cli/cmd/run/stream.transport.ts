@@ -175,10 +175,6 @@ function globalPayloadEvent(value: unknown): Event | undefined {
   }
 
   const payload = value.payload
-  if (payload.type === "sync") {
-    return undefined
-  }
-
   return isEvent(payload) ? payload : undefined
 }
 
@@ -191,7 +187,7 @@ function isMatchingDisposeEvent(value: unknown, directory: string | undefined): 
     return false
   }
 
-  return value.payload.type === "server.instance.disposed"
+  return value.payload.type === "global.disposed"
 }
 
 function active(event: Event, sessionID: string): boolean {

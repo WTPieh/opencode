@@ -339,11 +339,11 @@ function child(id: string): SessionChild {
   }
 }
 
-function globalEvent(payload: GlobalEvent["payload"]): GlobalEvent {
+function globalEvent(payload: SdkEvent | GlobalEvent["payload"]): GlobalEvent {
   return {
     directory: "/tmp",
     project: "project-1",
-    payload,
+    payload: payload as GlobalEvent["payload"],
   }
 }
 
@@ -1817,10 +1817,8 @@ describe("run stream transport", () => {
               await ready.promise
               yield globalEvent({
                 id: "evt-disposed",
-                type: "server.instance.disposed",
-                properties: {
-                  directory: "/tmp",
-                },
+                type: "global.disposed",
+                properties: {},
               })
             })(),
           ),
