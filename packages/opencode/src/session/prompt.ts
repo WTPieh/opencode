@@ -472,25 +472,10 @@ export const layer = Layer.effect(
         } satisfies MessageV2.ToolPart)
       }
 
-      if (!task.command) return
-
-      const summaryUserMsg: MessageV2.User = {
-        id: MessageID.ascending(),
-        sessionID,
-        role: "user",
-        time: { created: Date.now() },
-        agent: lastUser.agent,
-        model: lastUser.model,
-      }
-      yield* sessions.updateMessage(summaryUserMsg)
-      yield* sessions.updatePart({
-        id: PartID.ascending(),
-        messageID: summaryUserMsg.id,
-        sessionID,
-        type: "text",
-        text: "Summarize the task tool output above and continue with your task.",
-        synthetic: true,
-      } satisfies MessageV2.TextPart)
+      // Return the triggering command (if any) so the caller can emit a single
+      // follow-up "summarize" message for a whole batch of subtasks, instead of
+      // one per subtask. See the parallel-dispatch site in runLoop.
+      return task.command
     })
 
     const shellImpl = Effect.fn("SessionPrompt.shellImpl")(function* (input: ShellInput, ready?: Latch.Latch) {
@@ -1300,12 +1285,47 @@ export const layer = Layer.effect(
             }).pipe(Effect.ignore, Effect.forkIn(scope))
 
           const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
-          const task = tasks.pop()
 
-          if (task?.type === "subtask") {
-            yield* handleSubtask({ task, model, lastUser, sessionID, session, msgs })
+          // Run all pending subtasks concurrently (bounded) instead of one-per-loop.
+          // Multiple Task tool calls in a single response would otherwise serialize via
+          // tasks.pop(). Each subtask appends its own assistant/tool parts at the tail and
+          // we emit a single follow-up summary message afterward, so the orchestrator's
+          // prompt prefix (and the local KV cache) stays stable. See issue #14195 / PR #6478.
+          const subtaskParts = tasks.filter((t): t is MessageV2.SubtaskPart => t.type === "subtask")
+          if (subtaskParts.length > 0) {
+            // Default to 3 to match a typical local llama-server --parallel slot pool.
+            // Override with OPENCODE_SUBTASK_CONCURRENCY (positive integer).
+            const envConcurrency = Number(process.env["OPENCODE_SUBTASK_CONCURRENCY"])
+            const concurrency = Number.isInteger(envConcurrency) && envConcurrency > 0 ? envConcurrency : 3
+            const commands = yield* Effect.all(
+              subtaskParts.map((subtask) => handleSubtask({ task: subtask, model, lastUser, sessionID, session, msgs })),
+              { concurrency },
+            )
+            // Emit one follow-up message for the whole batch, only if any subtask was
+            // command-triggered (mirrors the old per-subtask behavior, deduplicated).
+            if (commands.some(Boolean)) {
+              const summaryUserMsg: MessageV2.User = {
+                id: MessageID.ascending(),
+                sessionID,
+                role: "user",
+                time: { created: Date.now() },
+                agent: lastUser.agent,
+                model: lastUser.model,
+              }
+              yield* sessions.updateMessage(summaryUserMsg)
+              yield* sessions.updatePart({
+                id: PartID.ascending(),
+                messageID: summaryUserMsg.id,
+                sessionID,
+                type: "text",
+                text: "Summarize the task tool output above and continue with your task.",
+                synthetic: true,
+              } satisfies MessageV2.TextPart)
+            }
             continue
           }
+
+          const task = tasks.pop()
 
           if (task?.type === "compaction") {
             const result = yield* compaction.process({
