@@ -9,7 +9,7 @@ import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
-import { Cause, Effect, Exit, Schema, Scope } from "effect"
+import { Cause, Effect, Exit, Schema, Scope, Semaphore } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 
@@ -92,6 +92,18 @@ function errorText(error: unknown) {
   if (error instanceof Error) return error.message
   return String(error)
 }
+
+// Cap concurrent subagent generations so a burst of parallel `task` tool calls can't exceed
+// the local model server's slot pool (e.g. llama-server --parallel). Process-wide; default 3,
+// override with OPENCODE_SUBTASK_CONCURRENCY. This gates each subagent's own generation (see
+// runTask below), independent of whether the calls arrive via the model's tool batch or the
+// session-loop subtask queue. opencode disables the `task` tool for subagents that lack task
+// permission, so the common one-level orchestrator->explorer fan-out can't deadlock on permits.
+const SUBTASK_CONCURRENCY = (() => {
+  const raw = Number(process.env["OPENCODE_SUBTASK_CONCURRENCY"])
+  return Number.isInteger(raw) && raw > 0 ? raw : 3
+})()
+const subtaskSemaphore = Semaphore.makeUnsafe(SUBTASK_CONCURRENCY)
 
 export const TaskTool = Tool.define(
   id,
@@ -182,21 +194,25 @@ export const TaskTool = Tool.define(
 
       const runTask = Effect.fn("TaskTool.runTask")(function* () {
         const parts = yield* ops.resolvePromptParts(params.prompt)
-        const result = yield* ops.prompt({
-          messageID: MessageID.ascending(),
-          sessionID: nextSession.id,
-          model: {
-            modelID: model.modelID,
-            providerID: model.providerID,
-          },
-          agent: next.name,
-          tools: {
-            ...(next.permission.some((rule) => rule.permission === "todowrite") ? {} : { todowrite: false }),
-            ...(next.permission.some((rule) => rule.permission === id) ? {} : { task: false }),
-            ...Object.fromEntries((cfg.experimental?.primary_tools ?? []).map((item) => [item, false])),
-          },
-          parts,
-        })
+        // Bounded: only SUBTASK_CONCURRENCY subagent generations run at once, so parallel
+        // task fan-out stays within the local server's slot pool and keeps the cache warm.
+        const result = yield* subtaskSemaphore.withPermits(1)(
+          ops.prompt({
+            messageID: MessageID.ascending(),
+            sessionID: nextSession.id,
+            model: {
+              modelID: model.modelID,
+              providerID: model.providerID,
+            },
+            agent: next.name,
+            tools: {
+              ...(next.permission.some((rule) => rule.permission === "todowrite") ? {} : { todowrite: false }),
+              ...(next.permission.some((rule) => rule.permission === id) ? {} : { task: false }),
+              ...Object.fromEntries((cfg.experimental?.primary_tools ?? []).map((item) => [item, false])),
+            },
+            parts,
+          }),
+        )
         return result.parts.findLast((item) => item.type === "text")?.text ?? ""
       })
 
